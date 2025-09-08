@@ -146,9 +146,9 @@ def train_vae(epochs=20, batch_size=128, latent_dim=128, short_run=False):
         print(f"\nEpoch {epoch + 1}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
 
         scheduler.step(avg_val_loss)
-
-    torch.save(model.state_dict(), "vae_celebA.pt")
-    print("\n[INFO] Model saved as vae_celebA.pt")
+    state_dict_fp16 = {k: (v.half() if torch.is_floating_point(v) else v) for k, v in model.state_dict.items()}
+    torch.save(state_dict_fp16, "vae_celebA_fp16.pt")
+    print("\n[INFO] Model saved as vae_celebA_fp16.pt")
 
     return model
 
@@ -172,3 +172,4 @@ def generate_faces(model, num_samples=16, latent_dim=128, save_path=None):
 if __name__ == "__main__":
     vae_model = train_vae(epochs=20, short_run=False)
     generate_faces(vae_model, save_path="generated_faces.png")
+
