@@ -40,7 +40,7 @@ def _save_checkpoint(model: nn.Module, epoch: int, run_idx: int,
     state_dict_fp16 = {k: (v.half() if torch.is_floating_point(v) else v) for (k,v) in model.state_dict().items()}
     torch.save(state_dict_fp16, path)
 
-    print(f"[INFO] Saved checkpoint: {path}")
+    print(f"Saved checkpoint: {path}")
     return path
 
 

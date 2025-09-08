@@ -28,7 +28,6 @@ class VAE(nn.Module):
     def __init__(self, latent_dim=128):
         super(VAE, self).__init__()
 
-        # Encoder
         self.enc_conv1 = nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1)
         self.enc_bn1 = nn.BatchNorm2d(64)
         self.enc_conv2 = nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)
@@ -39,7 +38,6 @@ class VAE(nn.Module):
         self.fc_mu = nn.Linear(256 * 16 * 16, latent_dim)
         self.fc_logvar = nn.Linear(256 * 16 * 16, latent_dim)
 
-        # Decoder
         self.fc_decode = nn.Linear(latent_dim, 256 * 16 * 16)
         self.dec_conv1 = nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1)
         self.dec_bn1 = nn.BatchNorm2d(128)
@@ -97,6 +95,7 @@ class CelebAHFDataset(Dataset):
 
 
 def train_vae(
+    dataset="",
     epochs=20,
     batch_size=128,
     latent_dim=128,
@@ -110,8 +109,8 @@ def train_vae(
         transforms.ToTensor()
     ])
 
-    print("\n[INFO] Loading CelebA from Hugging Face…")
-    celeba = load_dataset("flwrlabs/celeba")
+    print(f"\nLoading dataset from Hugging Face: {dataset}")
+    celeba = load_dataset(dataset)
 
     full_train = celeba["train"]
     split = full_train.train_test_split(test_size=0.1, seed=42)
@@ -121,7 +120,6 @@ def train_vae(
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
-    # Model + optimizer + scheduler
     model = VAE(latent_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3, betas=(0.95, 0.999))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -131,7 +129,7 @@ def train_vae(
     # Compute a run index (increments across runs)
     run_idx = _next_run_index(checkpoint_dir=checkpoint_dir, prefix=checkpoint_prefix)
 
-    print("\n[INFO] Starting training…")
+    print("\nStarting training…")
     t0_total = time.perf_counter()
 
     for epoch in range(epochs if not short_run else 1):
@@ -168,12 +166,12 @@ def train_vae(
         scheduler.step(avg_val_loss)
         elapsed_epoch = time.perf_counter() - t0_epoch
         print(f"\nEpoch {epoch + 1:03d}"
-              f" | Train: {avg_train_loss:.4f}"
-              f" | Val: {avg_val_loss:.4f}"
+              f" | Train: {avg_train_loss:.2f}"
+              f" | Val: {avg_val_loss:.2f}"
               f" | LR: {optimizer.param_groups[0]['lr']:.6f}"
               f" | [TIME] { _fmt_hms(elapsed_epoch) }")
 
-        # Save checkpoint with epoch, run index, date
+
         _save_checkpoint(
             model=model,
             epoch=epoch + 1,
@@ -199,18 +197,17 @@ def generate_faces_from_latest(
     Loads the latest checkpoint and saves a PNG with a name mirroring the checkpoint.
     E.g. ckpt: vae_E005_I003_D20250908-143012.pt -> samples/faces_vae_E005_I003_D20250908-143012_N16.png
     """
+    start_time = time.time()
     latest = _find_latest_checkpoint(checkpoint_dir=checkpoint_dir, prefix=prefix)
     if latest is None:
         print("[WARN] No checkpoints found.")
         return None
 
-    # Rebuild the model and load weights
     model = VAE(latent_dim=latent_dim).to(device)
     state = torch.load(latest, map_location=device)
     model.load_state_dict(state)
     model.eval()
 
-    # Generate and save
     with torch.no_grad():
         z = torch.randn(num_samples, latent_dim).to(device)
         samples = model.decode(z).cpu()
@@ -223,11 +220,13 @@ def generate_faces_from_latest(
         out_path = samples_dir / f"faces_{stem}_N{num_samples}.png"
         plt.savefig(out_path, bbox_inches="tight")
         plt.close()
-        print(f"[INFO] Generated faces from {latest.name} -> {out_path}")
+        end_time = time.time()
+        print(f"\nGenerated faces from {latest.name} -> {out_path}")
+        print(f"\nTime taken for generation: {_fmt_hms(end_time - start_time)}")
         return out_path
 
 
 if __name__ == "__main__":
-    print(f"[INFO] Using device: {device}")
-    vae_model = train_vae(epochs=20, short_run=True)
+    print(f"Using device: {device}")
+    vae_model = train_vae(dataset="flwrlabs/celeba", epochs=50, short_run=True)
     generate_faces_from_latest()
