@@ -172,13 +172,14 @@ def train_vae(
               f" | [TIME] { _fmt_hms(elapsed_epoch) }")
 
 
-        _save_checkpoint(
-            model=model,
-            epoch=epoch + 1,
-            run_idx=run_idx,
-            checkpoint_dir=checkpoint_dir,
-            prefix=checkpoint_prefix
-        )
+        if epoch % 4 == 0 or epoch == epochs - 1:
+            _save_checkpoint(
+                model=model,
+                epoch=epoch + 1,
+                run_idx=run_idx,
+                checkpoint_dir=checkpoint_dir,
+                prefix=checkpoint_prefix
+            )
 
     elapsed_total = time.perf_counter() - t0_total
     print(f"\n[TIME] Full training took { _fmt_hms(elapsed_total) }")
@@ -228,5 +229,5 @@ def generate_faces_from_latest(
 
 if __name__ == "__main__":
     print(f"Using device: {device}")
-    vae_model = train_vae(dataset="flwrlabs/celeba", epochs=50, short_run=True)
+    vae_model = train_vae(dataset="flwrlabs/celeba", epochs=50, short_run=False)
     generate_faces_from_latest()
