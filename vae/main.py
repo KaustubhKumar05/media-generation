@@ -11,9 +11,10 @@ import matplotlib.pyplot as plt
 from datasets import load_dataset
 from torch.utils.data import DataLoader, Dataset
 
-from utils import (FILENAME_PREFIX, CHECKPOINT_DIR, SAMPLES_DIR,
-                   _fmt_hms, _next_run_index, _save_checkpoint, _find_latest_checkpoint)
-
+from utils import (
+    FILENAME_PREFIX, CHECKPOINT_DIR, SAMPLES_DIR,
+    _fmt_hms, _next_run_index, _save_checkpoint, _find_latest_checkpoint
+)
 
 if torch.backends.mps.is_available():
     device = torch.device("mps")
@@ -25,30 +26,25 @@ SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class VAE(nn.Module):
-    def __init__(self, latent_dim=128):
+    def __init__(self, latent_dim=64):
         super(VAE, self).__init__()
 
         self.enc_conv1 = nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1)
-        self.enc_bn1 = nn.BatchNorm2d(64)
         self.enc_conv2 = nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)
-        self.enc_bn2 = nn.BatchNorm2d(128)
         self.enc_conv3 = nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1)
-        self.enc_bn3 = nn.BatchNorm2d(256)
 
         self.fc_mu = nn.Linear(256 * 16 * 16, latent_dim)
         self.fc_logvar = nn.Linear(256 * 16 * 16, latent_dim)
 
         self.fc_decode = nn.Linear(latent_dim, 256 * 16 * 16)
         self.dec_conv1 = nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1)
-        self.dec_bn1 = nn.BatchNorm2d(128)
         self.dec_conv2 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1)
-        self.dec_bn2 = nn.BatchNorm2d(64)
         self.dec_conv3 = nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1)
 
     def encode(self, x):
-        x = F.relu(self.enc_bn1(self.enc_conv1(x)))
-        x = F.relu(self.enc_bn2(self.enc_conv2(x)))
-        x = F.relu(self.enc_bn3(self.enc_conv3(x)))
+        x = F.relu(self.enc_conv1(x))
+        x = F.relu(self.enc_conv2(x))
+        x = F.relu(self.enc_conv3(x))
         x = x.view(x.size(0), -1)
         mu = self.fc_mu(x)
         logvar = self.fc_logvar(x)
@@ -62,8 +58,8 @@ class VAE(nn.Module):
     def decode(self, z):
         x = self.fc_decode(z)
         x = x.view(-1, 256, 16, 16)
-        x = F.relu(self.dec_bn1(self.dec_conv1(x)))
-        x = F.relu(self.dec_bn2(self.dec_conv2(x)))
+        x = F.relu(self.dec_conv1(x))
+        x = F.relu(self.dec_conv2(x))
         x = torch.sigmoid(self.dec_conv3(x))
         return x
 
@@ -74,8 +70,8 @@ class VAE(nn.Module):
 
 
 def vae_loss(recon_x, x, mu, logvar):
-    recon_loss = F.mse_loss(recon_x, x, reduction="mean")
-    kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    recon_loss = F.binary_cross_entropy(recon_x, x, reduction="sum") / x.size(0)
+    kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / x.size(0)
     return recon_loss + kld
 
 
@@ -95,10 +91,10 @@ class CelebAHFDataset(Dataset):
 
 
 def train_vae(
-    dataset="",
+    dataset="flwrlabs/celeba",
     epochs=20,
     batch_size=128,
-    latent_dim=128,
+    latent_dim=64,
     short_run=False,
     checkpoint_dir: Path = CHECKPOINT_DIR,
     checkpoint_prefix: str = FILENAME_PREFIX,
@@ -121,12 +117,11 @@ def train_vae(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     model = VAE(latent_dim).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3, betas=(0.95, 0.999))
+    optimizer = optim.Adam(model.parameters(), lr=3e-4, betas=(0.9, 0.999))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=1e-6
     )
 
-    # Compute a run index (increments across runs)
     run_idx = _next_run_index(checkpoint_dir=checkpoint_dir, prefix=checkpoint_prefix)
 
     print("\nStarting training…")
@@ -149,10 +144,8 @@ def train_vae(
             if short_run and batch_idx > 10:
                 break
 
-        # Average by number of batches for readability
         avg_train_loss = total_loss / len(train_loader)
 
-        # Validation
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -162,22 +155,28 @@ def train_vae(
                 val_loss += vae_loss(recon, val_data, mu, logvar).item()
         avg_val_loss = val_loss / len(val_loader)
 
-        # Scheduler step & logs
         scheduler.step(avg_val_loss)
         elapsed_epoch = time.perf_counter() - t0_epoch
-        print(f"\nEpoch {epoch + 1:03d}"
+
+        print(f"\nEpoch {epoch + 1:03d} completed"
               f" | Train: {avg_train_loss:.2f}"
               f" | Val: {avg_val_loss:.2f}"
               f" | LR: {optimizer.param_groups[0]['lr']:.6f}"
               f" | [TIME] { _fmt_hms(elapsed_epoch) }")
 
-
-        if epoch % 4 == 0 or epoch == epochs - 1:
+        if (epoch + 1) % 10 == 0 or epoch == epochs - 1:
             _save_checkpoint(
                 model=model,
                 epoch=epoch + 1,
                 run_idx=run_idx,
                 checkpoint_dir=checkpoint_dir,
+                prefix=checkpoint_prefix
+            )
+            generate_faces_from_latest(
+                latent_dim=latent_dim,
+                num_samples=16,
+                checkpoint_dir=checkpoint_dir,
+                samples_dir=SAMPLES_DIR,
                 prefix=checkpoint_prefix
             )
 
@@ -188,20 +187,15 @@ def train_vae(
 
 
 def generate_faces_from_latest(
-    latent_dim=128,
+    latent_dim=64,
     num_samples=16,
     checkpoint_dir: Path = CHECKPOINT_DIR,
     samples_dir: Path = SAMPLES_DIR,
     prefix: str = FILENAME_PREFIX
 ) -> Path | None:
-    """
-    Loads the latest checkpoint and saves a PNG with a name mirroring the checkpoint.
-    E.g. ckpt: vae_E005_I003_D20250908-143012.pt -> samples/faces_vae_E005_I003_D20250908-143012_N16.png
-    """
-    start_time = time.time()
     latest = _find_latest_checkpoint(checkpoint_dir=checkpoint_dir, prefix=prefix)
     if latest is None:
-        print("[WARN] No checkpoints found.")
+        print("\nNo checkpoints found.")
         return None
 
     model = VAE(latent_dim=latent_dim).to(device)
@@ -217,17 +211,14 @@ def generate_faces_from_latest(
         plt.imshow(grid.permute(1, 2, 0))
         plt.axis("off")
 
-        stem = latest.stem  # "vae_E###_I###_DYYYYMMDD-HHMMSS"
+        stem = latest.stem
         out_path = samples_dir / f"faces_{stem}_N{num_samples}.png"
         plt.savefig(out_path, bbox_inches="tight")
         plt.close()
-        end_time = time.time()
         print(f"\nGenerated faces from {latest.name} -> {out_path}")
-        print(f"\nTime taken for generation: {_fmt_hms(end_time - start_time)}")
         return out_path
 
 
 if __name__ == "__main__":
     print(f"Using device: {device}")
     vae_model = train_vae(dataset="flwrlabs/celeba", epochs=50, short_run=False)
-    generate_faces_from_latest()
