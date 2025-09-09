@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 
@@ -23,6 +24,10 @@ else:
 
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+
+BATCH_SIZE = 256
+LR = 3e-4
+NUM_WORKERS = os.cpu_count() - 2
 
 
 class VAE(nn.Module):
@@ -93,7 +98,7 @@ class CelebAHFDataset(Dataset):
 def train_vae(
     dataset="flwrlabs/celeba",
     epochs=20,
-    batch_size=128,
+    batch_size=BATCH_SIZE,
     latent_dim=64,
     short_run=False,
     checkpoint_dir: Path = CHECKPOINT_DIR,
@@ -113,11 +118,11 @@ def train_vae(
     train_dataset = CelebAHFDataset(split["train"], transform=transform)
     val_dataset = CelebAHFDataset(split["test"], transform=transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     model = VAE(latent_dim).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=3e-4, betas=(0.9, 0.999))
+    optimizer = optim.Adam(model.parameters(), lr=LR, betas=(0.9, 0.999))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=1e-6
     )
@@ -158,11 +163,11 @@ def train_vae(
         scheduler.step(avg_val_loss)
         elapsed_epoch = time.perf_counter() - t0_epoch
 
-        print(f"\nEpoch {epoch + 1:03d} completed"
+        print(f"Epoch {epoch + 1:03d} completed"
               f" | Train: {avg_train_loss:.2f}"
               f" | Val: {avg_val_loss:.2f}"
               f" | LR: {optimizer.param_groups[0]['lr']:.6f}"
-              f" | [TIME] { _fmt_hms(elapsed_epoch) }")
+              f" | [TIME] { _fmt_hms(elapsed_epoch) }\n")
 
         if (epoch + 1) % 10 == 0 or epoch == epochs - 1:
             _save_checkpoint(
@@ -221,4 +226,5 @@ def generate_faces_from_latest(
 
 if __name__ == "__main__":
     print(f"Using device: {device}")
+    print(f"Number of CPU cores: {os.cpu_count()}")
     vae_model = train_vae(dataset="flwrlabs/celeba", epochs=50, short_run=False)
