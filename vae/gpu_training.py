@@ -15,7 +15,6 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-import torch
 import torch.nn as nn
 
 CHECKPOINT_DIR = Path("checkpoints")
@@ -83,7 +82,7 @@ def _find_latest_checkpoint(checkpoint_dir: Path = CHECKPOINT_DIR,
 
 """# Dataset class"""
 
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 
 class CelebAHFDataset(Dataset):
     def __init__(self, hf_dataset, transform=None):
@@ -101,7 +100,6 @@ class CelebAHFDataset(Dataset):
 
 """# Dataloaders"""
 
-import os
 import time
 from pathlib import Path
 
@@ -113,7 +111,7 @@ from torchvision import transforms, utils
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from datasets import load_dataset
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
 
 device = "cpu"
@@ -216,9 +214,7 @@ def vae_loss(recon_x, x, mu, logvar, epoch):
 """# Training loop"""
 
 def train_vae(
-    dataset="flwrlabs/celeba",
     epochs=20,
-    batch_size=BATCH_SIZE,
     latent_dim=LATENT_DIM,
     short_run=False,
     checkpoint_dir: Path = CHECKPOINT_DIR,
@@ -237,7 +233,7 @@ def train_vae(
         t0_epoch = time.perf_counter()
 
         model.train()
-        total_loss, total_recon, total_kld = 0.0, 0.0, 0.0
+        total_recon, total_kld = 0.0, 0.0
 
         scaler = torch.amp.GradScaler("cuda")
 
@@ -253,12 +249,14 @@ def train_vae(
             scaler.step(optimizer)
             scaler.update()
 
-            total_loss += loss.item()
+            total_recon += recon_loss.item()
+            total_kld += kld.item()
 
             if short_run and batch_idx > 10:
                 break
 
-        avg_train_loss = total_loss / len(train_loader)
+        beta = min(1.0, epoch / WARMUP_EPOCHS) * MAX_BETA
+        avg_train_loss = (total_recon + beta * total_kld) / len(train_loader)
         avg_recon = total_recon / len(train_loader)
         avg_kld = total_kld / len(train_loader)
 
@@ -268,7 +266,7 @@ def train_vae(
             for val_data, _ in val_loader:
                 val_data = val_data.to(device)
                 recon, mu, logvar = model(val_data)
-                current_val_loss, _, _, beta = vae_loss(recon, val_data, mu, logvar, epoch)
+                current_val_loss, _, _, _ = vae_loss(recon, val_data, mu, logvar, epoch)
                 val_loss += current_val_loss.item()
         avg_val_loss = val_loss / len(val_loader)
 
@@ -331,6 +329,6 @@ def generate_faces_from_latest(
         print(f"\nGenerated faces from {latest.name} -> {out_path}")
         return out_path
 
-vae_model = train_vae(dataset="flwrlabs/celeba", epochs=20, short_run=True)
+vae_model = train_vae(epochs=20, short_run=True)
 # generate_faces_from_latest()
 

@@ -141,7 +141,7 @@ def train_vae(
         t0_epoch = time.perf_counter()
 
         model.train()
-        total_loss, total_recon, total_kld = 0.0, 0.0, 0.0
+        total_recon, total_kld = 0.0, 0.0
 
         for batch_idx, (data, _) in enumerate(tqdm(train_loader)):
             data = data.to(device)
@@ -151,12 +151,15 @@ def train_vae(
 
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
+
+            total_recon += recon_loss.item()
+            total_kld += kld.item()
 
             if short_run and batch_idx > 10:
                 break
 
-        avg_train_loss = total_loss / len(train_loader)
+        beta = min(1.0, epoch / WARMUP_EPOCHS) * MAX_BETA
+        avg_train_loss = (total_recon + beta * total_kld) / len(train_loader)
         avg_recon = total_recon / len(train_loader)
         avg_kld = total_kld / len(train_loader)
 
@@ -166,7 +169,7 @@ def train_vae(
             for val_data, _ in val_loader:
                 val_data = val_data.to(device)
                 recon, mu, logvar = model(val_data)
-                current_val_loss, _, _, beta = vae_loss(recon, val_data, mu, logvar, epoch)
+                current_val_loss, _, _, _ = vae_loss(recon, val_data, mu, logvar, epoch)
                 val_loss += current_val_loss.item()
         avg_val_loss = val_loss / len(val_loader)
 
