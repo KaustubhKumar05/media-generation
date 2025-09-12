@@ -8,7 +8,7 @@ has a `short_run` option to test out pipeline changes by running for one epoch.
 Result after training on "flwrlabs/celeba" from HuggingFace for 50 epochs: 
 ![generated_faces](vae/samples/faces_vae_E050_I004_D20250910-000948_N16.png)
 
-Clearly needs more training
+Clearly needs more training. Tested the script on Colab with GPU specific changes, refer `vae/gpu_training.py` 
 
 ### GANs (...)
 

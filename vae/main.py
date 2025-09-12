@@ -26,12 +26,18 @@ CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 
 BATCH_SIZE = 256
-LR = 3e-4
+LR = 5e-4
 NUM_WORKERS = os.cpu_count() - 2
+SEED = 0
+LATENT_DIM = 64
+WARMUP_EPOCHS = 10
+MAX_BETA = 4.0
 
+
+torch.manual_seed(SEED)
 
 class VAE(nn.Module):
-    def __init__(self, latent_dim=64):
+    def __init__(self, latent_dim=LATENT_DIM):
         super(VAE, self).__init__()
 
         self.enc_conv1 = nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1)
@@ -47,9 +53,9 @@ class VAE(nn.Module):
         self.dec_conv3 = nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1)
 
     def encode(self, x):
-        x = F.relu(self.enc_conv1(x))
-        x = F.relu(self.enc_conv2(x))
-        x = F.relu(self.enc_conv3(x))
+        x = F.leaky_relu(self.enc_conv1(x))
+        x = F.leaky_relu(self.enc_conv2(x))
+        x = F.leaky_relu(self.enc_conv3(x))
         x = x.view(x.size(0), -1)
         mu = self.fc_mu(x)
         logvar = self.fc_logvar(x)
@@ -63,8 +69,8 @@ class VAE(nn.Module):
     def decode(self, z):
         x = self.fc_decode(z)
         x = x.view(-1, 256, 16, 16)
-        x = F.relu(self.dec_conv1(x))
-        x = F.relu(self.dec_conv2(x))
+        x = F.leaky_relu(self.dec_conv1(x))
+        x = F.leaky_relu(self.dec_conv2(x))
         x = torch.sigmoid(self.dec_conv3(x))
         return x
 
@@ -74,10 +80,12 @@ class VAE(nn.Module):
         return self.decode(z), mu, logvar
 
 
-def vae_loss(recon_x, x, mu, logvar):
+def vae_loss(recon_x, x, mu, logvar, epoch):
     recon_loss = F.binary_cross_entropy(recon_x, x, reduction="sum") / x.size(0)
-    kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / x.size(0)
-    return recon_loss + kld
+    kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - torch.exp(logvar)) / (x.size(0) * mu.size(1))
+
+    beta = min(1.0, epoch / WARMUP_EPOCHS) * MAX_BETA
+    return recon_loss + kld * beta, recon_loss, kld, beta
 
 
 class CelebAHFDataset(Dataset):
@@ -99,7 +107,7 @@ def train_vae(
     dataset="flwrlabs/celeba",
     epochs=20,
     batch_size=BATCH_SIZE,
-    latent_dim=64,
+    latent_dim=LATENT_DIM,
     short_run=False,
     checkpoint_dir: Path = CHECKPOINT_DIR,
     checkpoint_prefix: str = FILENAME_PREFIX,
@@ -122,10 +130,7 @@ def train_vae(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     model = VAE(latent_dim).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=LR, betas=(0.9, 0.999))
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=3, min_lr=1e-6
-    )
+    optimizer = optim.Adam(model.parameters(), lr=LR)
 
     run_idx = _next_run_index(checkpoint_dir=checkpoint_dir, prefix=checkpoint_prefix)
 
@@ -136,12 +141,14 @@ def train_vae(
         t0_epoch = time.perf_counter()
 
         model.train()
-        total_loss = 0.0
+        total_loss, total_recon, total_kld = 0.0, 0.0, 0.0
+
         for batch_idx, (data, _) in enumerate(tqdm(train_loader)):
             data = data.to(device)
             optimizer.zero_grad()
             recon, mu, logvar = model(data)
-            loss = vae_loss(recon, data, mu, logvar)
+            loss, recon_loss, kld, beta = vae_loss(recon, data, mu, logvar, epoch)
+
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -150,6 +157,8 @@ def train_vae(
                 break
 
         avg_train_loss = total_loss / len(train_loader)
+        avg_recon = total_recon / len(train_loader)
+        avg_kld = total_kld / len(train_loader)
 
         model.eval()
         val_loss = 0.0
@@ -157,17 +166,15 @@ def train_vae(
             for val_data, _ in val_loader:
                 val_data = val_data.to(device)
                 recon, mu, logvar = model(val_data)
-                val_loss += vae_loss(recon, val_data, mu, logvar).item()
+                current_val_loss, _, _, beta = vae_loss(recon, val_data, mu, logvar, epoch)
+                val_loss += current_val_loss.item()
         avg_val_loss = val_loss / len(val_loader)
 
-        scheduler.step(avg_val_loss)
         elapsed_epoch = time.perf_counter() - t0_epoch
 
-        print(f"Epoch {epoch + 1:03d} completed"
-              f" | Train: {avg_train_loss:.2f}"
-              f" | Val: {avg_val_loss:.2f}"
-              f" | LR: {optimizer.param_groups[0]['lr']:.6f}"
-              f" | [TIME] { _fmt_hms(elapsed_epoch) }\n")
+        print(f"Epoch {epoch:03d} | Train: {avg_train_loss:.4f} "
+              f"(Recon: {avg_recon:.4f}, KL: {avg_kld:.4f}, β={beta:.2f}) "
+              f"| Val: {avg_val_loss:.4f} | [TIME] {_fmt_hms(elapsed_epoch)}")
 
         if (epoch + 1) % 10 == 0 or epoch == epochs - 1:
             _save_checkpoint(
@@ -192,7 +199,7 @@ def train_vae(
 
 
 def generate_faces_from_latest(
-    latent_dim=64,
+    latent_dim=LATENT_DIM,
     num_samples=16,
     checkpoint_dir: Path = CHECKPOINT_DIR,
     samples_dir: Path = SAMPLES_DIR,
@@ -226,5 +233,4 @@ def generate_faces_from_latest(
 
 if __name__ == "__main__":
     print(f"Using device: {device}")
-    print(f"Number of CPU cores: {os.cpu_count()}")
-    vae_model = train_vae(dataset="flwrlabs/celeba", epochs=50, short_run=False)
+    vae_model = train_vae(dataset="flwrlabs/celeba", epochs=20, short_run=False)

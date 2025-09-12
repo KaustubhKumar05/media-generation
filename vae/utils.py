@@ -47,19 +47,23 @@ def _save_checkpoint(model: nn.Module, epoch: int, run_idx: int,
 def _find_latest_checkpoint(checkpoint_dir: Path = CHECKPOINT_DIR,
                             prefix: str = FILENAME_PREFIX) -> Path | None:
     """
-    Find the 'latest' checkpoint by (epoch, index, date) parsed from the filename.
+    Find the latest checkpoint file, preferring parsed (epoch, index, date),
+    but falling back to modification time when needed.
     """
     candidates = list(checkpoint_dir.glob(f"{prefix}_E*_I*_D*.pt"))
     if not candidates:
         return None
 
     rx = re.compile(rf"{re.escape(prefix)}_E(\d+)_I(\d+)_D(\d{{8}}-\d{{6}})\.pt$")
+
     def key(p: Path):
         m = rx.match(p.name)
-        if not m:
-            # fallback to modified time if name doesn't parse
+        if m:
+            e, i, ds = int(m.group(1)), int(m.group(2)), m.group(3)
+            # Include st_mtime as final tie-breaker
+            return (e, i, ds, p.stat().st_mtime)
+        else:
+            # Unparseable → rank lowest, sorted by modified time
             return (0, 0, "00000000-000000", p.stat().st_mtime)
-        e, i, ds = int(m.group(1)), int(m.group(2)), m.group(3)
-        return (e, i, ds, 0)
 
     return max(candidates, key=key)
