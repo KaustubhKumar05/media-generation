@@ -237,3 +237,4 @@ def generate_faces_from_latest(
 if __name__ == "__main__":
     print(f"Using device: {device}")
     vae_model = train_vae(dataset="flwrlabs/celeba", epochs=20, short_run=False)
+    # generate_faces_from_latest()
