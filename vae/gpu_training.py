@@ -112,6 +112,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from datasets import load_dataset
 from torch.utils.data import DataLoader
+import multiprocessing
 
 
 device = "cpu"
@@ -127,19 +128,21 @@ print(f"Using device: {device}")
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 
-BATCH_SIZE = 256
+BATCH_SIZE = 1024
 LR = 5e-4
 SEED = 0
-LATENT_DIM = 64
+LATENT_DIM = 128
 WARMUP_EPOCHS = 10
-MAX_BETA = 4.0
+MAX_BETA = 2.0
+NUM_WORKERS = min(32, multiprocessing.cpu_count() - 1)
 
 torch.manual_seed(SEED)
 
 transform = transforms.Compose([
         transforms.CenterCrop(178),
         transforms.Resize(128),
-        transforms.ToTensor()
+        transforms.ToTensor(),
+        transforms.Normalize([0.5]*3, [0.5]*3) # Scale to [-1, 1]
     ])
 
 print(f"\nLoading dataset from Hugging Face: {dataset}")
@@ -150,8 +153,10 @@ split = full_train.train_test_split(test_size=0.1, seed=SEED)
 train_dataset = CelebAHFDataset(split["train"], transform=transform)
 val_dataset = CelebAHFDataset(split["test"], transform=transform)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS,
+                          pin_memory=True, prefetch_factor=4, persistent_workers=True)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=max(1, NUM_WORKERS // 2),
+                        pin_memory=True, persistent_workers=True, prefetch_factor=2)
 
 # !nvidia-smi
 
@@ -192,7 +197,7 @@ class VAE(nn.Module):
         x = x.view(-1, 256, 16, 16)
         x = F.leaky_relu(self.dec_conv1(x))
         x = F.leaky_relu(self.dec_conv2(x))
-        x = torch.sigmoid(self.dec_conv3(x))
+        x = torch.tanh(self.dec_conv3(x))
         return x
 
     def forward(self, x):
@@ -203,7 +208,7 @@ class VAE(nn.Module):
 
 def vae_loss(recon_x, x, mu, logvar, epoch):
     with torch.amp.autocast("cuda", enabled=False):
-        recon_loss = F.binary_cross_entropy(
+        recon_loss = F.mse_loss(
             recon_x.float(), x.float(), reduction="sum"
         ) / x.size(0)
     kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - torch.exp(logvar)) / (x.size(0) * mu.size(1))
@@ -220,7 +225,7 @@ def train_vae(
     checkpoint_dir: Path = CHECKPOINT_DIR,
     checkpoint_prefix: str = FILENAME_PREFIX,
 ):
-
+    torch.backends.cudnn.benchmark = True
     model = VAE(latent_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=LR)
 
@@ -238,7 +243,7 @@ def train_vae(
         scaler = torch.amp.GradScaler("cuda")
 
         for batch_idx, (data, _) in enumerate(tqdm(train_loader)):
-            data = data.to(device)
+            data = data.to(device, non_blocking=True)
 
             optimizer.zero_grad()
             with torch.amp.autocast("cuda"):
@@ -329,6 +334,5 @@ def generate_faces_from_latest(
         print(f"\nGenerated faces from {latest.name} -> {out_path}")
         return out_path
 
-vae_model = train_vae(epochs=20, short_run=True)
-# generate_faces_from_latest()
 
+vae_model = train_vae(epochs=100, short_run=False)
