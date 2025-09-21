@@ -18,7 +18,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-import tqdm
+from tqdm import tqdm
 
 CHECKPOINT_DIR = Path("checkpoints")
 SAMPLES_DIR = Path("samples")
@@ -58,38 +58,6 @@ def _find_latest_checkpoint(checkpoint_dir: Path = CHECKPOINT_DIR,
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-
-# ========================
-# Google Drive Utils (optional)
-# ========================
-from pydrive2.auth import GoogleAuth
-from pydrive2.drive import GoogleDrive
-
-
-def get_drive(service_account_json: str) -> GoogleDrive:
-    gauth = GoogleAuth()
-    gauth.LoadServiceConfigFile({
-        "client_config_backend": "service",
-        "service_config": {"client_json_file_path": service_account_json}
-    })
-    gauth.ServiceAuth()
-    return GoogleDrive(gauth)
-
-
-def upload_file(drive: GoogleDrive, local_path: str | Path, folder_id: str | None = None) -> str:
-    file_path = Path(local_path)
-    if not file_path.exists():
-        raise FileNotFoundError(f"{file_path} not found!")
-
-    metadata = {"title": file_path.name}
-    if folder_id:
-        metadata["parents"] = [{"id": folder_id}]
-
-    gfile = drive.CreateFile(metadata)
-    gfile.SetContentFile(str(file_path))
-    gfile.Upload()
-    print(f"Uploaded {file_path} to Drive (id={gfile['id']})")
-    return gfile["id"]
 
 
 # ========================
@@ -227,8 +195,7 @@ def vae_loss(recon_x, x, mu, logvar, epoch):
 # Training Loop
 # ========================
 def _save_checkpoint(model: nn.Module, epoch: int, run_idx: int,
-                     checkpoint_dir: Path, prefix: str,
-                     drive: GoogleDrive | None = None, drive_folder_id: str | None = None) -> Path:
+                     checkpoint_dir: Path, prefix: str) -> Path:
     datestr = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = checkpoint_dir / f"{prefix}_E{epoch:03d}_I{run_idx:03d}_D{datestr}.pt"
 
@@ -247,8 +214,7 @@ def _save_checkpoint(model: nn.Module, epoch: int, run_idx: int,
 
 def generate_faces_from_latest(latent_dim=LATENT_DIM, num_samples=16,
                                checkpoint_dir: Path = CHECKPOINT_DIR, samples_dir: Path = SAMPLES_DIR,
-                               prefix: str = FILENAME_PREFIX,
-                               drive: GoogleDrive | None = None, drive_folder_id: str | None = None) -> Path | None:
+                               prefix: str = FILENAME_PREFIX) -> Path | None:
     latest = _find_latest_checkpoint(checkpoint_dir, prefix)
     if latest is None:
         print("\nNo checkpoints found.")
@@ -273,8 +239,6 @@ def generate_faces_from_latest(latent_dim=LATENT_DIM, num_samples=16,
         plt.close()
         print(f"\nGenerated faces from {latest.name} -> {out_path}")
 
-        if drive:
-            upload_file(drive, out_path, folder_id=drive_folder_id)
 
         return out_path
 
@@ -296,15 +260,11 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
 
     run_idx = _next_run_index(checkpoint_dir=checkpoint_dir, prefix=checkpoint_prefix)
 
-    drive = None
-    if service_account_json and drive_folder_id:
-        drive = get_drive(service_account_json)
-        print(f"Connected to Google Drive (folder id={drive_folder_id})")
 
     print("\nStarting training…")
     t0_total = time.perf_counter()
 
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    scaler = torch.amp.GradScaler(device.type, enabled=(device.type == "cuda"))
 
     for epoch in range(epochs if not short_run else 1):
         t0_epoch = time.perf_counter()
@@ -357,11 +317,10 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
               f"| Val: {avg_val_loss:.4f} | [TIME] {_fmt_hms(elapsed_epoch)}")
 
         if (checkpoint_freq > 0 and (epoch + 1) % checkpoint_freq == 0) or epoch == epochs - 1:
-            _save_checkpoint(model, epoch + 1, run_idx, checkpoint_dir, checkpoint_prefix, drive, drive_folder_id)
+            _save_checkpoint(model, epoch + 1, run_idx, checkpoint_dir, checkpoint_prefix)
 
         if (sampling_freq > 0 and (epoch + 1) % sampling_freq == 0) or epoch == epochs - 1:
-            generate_faces_from_latest(latent_dim, 16, checkpoint_dir, SAMPLES_DIR, checkpoint_prefix,
-                                       drive=drive, drive_folder_id=drive_folder_id)
+            generate_faces_from_latest(latent_dim, 16, checkpoint_dir, SAMPLES_DIR, checkpoint_prefix)
 
     elapsed_total = time.perf_counter() - t0_total
     print(f"\n[TIME] Full training took {_fmt_hms(elapsed_total)}")
@@ -378,8 +337,5 @@ if __name__ == "__main__":
         checkpoint_freq=1,
         sampling_freq=1,
         short_run=False,
-        # Optional:
-        service_account_json="json file path here",
-        drive_folder_id="1I_KQDtb7PiPS1dyycMY_yeW27y131Oen"
     )
     # generate_faces_from_latest()
