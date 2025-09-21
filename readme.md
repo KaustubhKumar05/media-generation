@@ -8,8 +8,8 @@ has a `short_run` option to test out pipeline changes by running for one epoch.
 Result after training on "flwrlabs/celeba" from HuggingFace for 50 epochs: 
 ![generated_faces](vae/samples/faces_vae_E050_I004_D20250910-000948_N16.png)
 
-Clearly needs more training. Tested the script on Colab with GPU specific changes, refer `vae/gpu_training.py`. Despite
-the optimizations, a T4 GPU requires ~12 mins per epoch. Will try some training runs on Modal later 
+Clearly needs more training. Tested the script on Modal with GPU specific changes, refer `vae/raining.py`. An Nvidia A10G
+takes ~1.5 mins per epoch.
 
 ### GANs (...)
 
