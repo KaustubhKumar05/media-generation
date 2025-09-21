@@ -1306,6 +1306,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "datasets" },
+    { name = "huggingface-hub" },
     { name = "matplotlib" },
     { name = "torch" },
     { name = "torchvision" },
@@ -1315,6 +1316,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "datasets", specifier = ">=4.0.0" },
+    { name = "huggingface-hub", specifier = ">=0.34.4" },
     { name = "matplotlib", specifier = ">=3.10.6" },
     { name = "torch", specifier = ">=2.8.0" },
     { name = "torchvision", specifier = ">=0.23.0" },

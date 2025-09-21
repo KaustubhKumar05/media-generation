@@ -28,6 +28,33 @@ CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 
 
+from huggingface_hub import HfApi
+
+hf_api = HfApi()
+hf_repo_id = "kozonhf/uploads"
+
+def hf_upload(local_path: str | Path,
+              repo_id: str,
+              subdir: str = "",
+              repo_type: str = "model") -> str:
+    """
+    Upload any file (weights, images, logs) to a single HF repo.
+    Files are organized by subdir in the repo.
+    """
+    local_path = Path(local_path)
+    path_in_repo = f"{subdir}/{local_path.name}" if subdir else local_path.name
+
+    commit_url = hf_api.upload_file(
+        path_or_fileobj=str(local_path),
+        path_in_repo=path_in_repo,
+        repo_id=repo_id,
+        repo_type=repo_type,
+    )
+    print(f"Uploaded {local_path} → {repo_id}/{path_in_repo}")
+    return commit_url
+
+
+
 def _fmt_hms(seconds: float) -> str:
     s = int(seconds)
     m, s = divmod(s, 60)
@@ -195,7 +222,7 @@ def vae_loss(recon_x, x, mu, logvar, epoch):
 # Training Loop
 # ========================
 def _save_checkpoint(model: nn.Module, epoch: int, run_idx: int,
-                     checkpoint_dir: Path, prefix: str) -> Path:
+                     checkpoint_dir: Path, prefix: str, hf_repo_id: str = "") -> Path:
     datestr = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = checkpoint_dir / f"{prefix}_E{epoch:03d}_I{run_idx:03d}_D{datestr}.pt"
 
@@ -206,15 +233,15 @@ def _save_checkpoint(model: nn.Module, epoch: int, run_idx: int,
 
     print(f"\nSaved checkpoint: {path}")
 
-    if drive:
-        upload_file(drive, path, folder_id=drive_folder_id)
+    if hf_repo_id:
+        hf_upload(path, hf_repo_id, subdir="checkpoints")
 
     return path
 
 
 def generate_faces_from_latest(latent_dim=LATENT_DIM, num_samples=16,
                                checkpoint_dir: Path = CHECKPOINT_DIR, samples_dir: Path = SAMPLES_DIR,
-                               prefix: str = FILENAME_PREFIX) -> Path | None:
+                               prefix: str = FILENAME_PREFIX, hf_repo_id: str = "") -> Path | None:
     latest = _find_latest_checkpoint(checkpoint_dir, prefix)
     if latest is None:
         print("\nNo checkpoints found.")
@@ -239,18 +266,17 @@ def generate_faces_from_latest(latent_dim=LATENT_DIM, num_samples=16,
         plt.close()
         print(f"\nGenerated faces from {latest.name} -> {out_path}")
 
-
+        if hf_repo_id:
+            hf_upload(out_path, hf_repo_id, subdir="samples")
         return out_path
 
 
 def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
               checkpoint_freq=10, sampling_freq=10,
-              checkpoint_dir: Path = CHECKPOINT_DIR, checkpoint_prefix: str = FILENAME_PREFIX,
-              service_account_json: str | None = None, drive_folder_id: str | None = None):
+              checkpoint_dir: Path = CHECKPOINT_DIR, checkpoint_prefix: str = FILENAME_PREFIX):
     """
     Train VAE model.
-    If service_account_json + drive_folder_id are provided,
-    checkpoints and sample images will be uploaded to Google Drive.
+    Checkpoints and sample images will be uploaded to HF
     """
     torch.backends.cudnn.benchmark = True
     model = VAE(latent_dim).to(device)
@@ -317,10 +343,10 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
               f"| Val: {avg_val_loss:.4f} | [TIME] {_fmt_hms(elapsed_epoch)}")
 
         if (checkpoint_freq > 0 and (epoch + 1) % checkpoint_freq == 0) or epoch == epochs - 1:
-            _save_checkpoint(model, epoch + 1, run_idx, checkpoint_dir, checkpoint_prefix)
+            _save_checkpoint(model, epoch + 1, run_idx, checkpoint_dir, checkpoint_prefix, hf_repo_id)
 
         if (sampling_freq > 0 and (epoch + 1) % sampling_freq == 0) or epoch == epochs - 1:
-            generate_faces_from_latest(latent_dim, 16, checkpoint_dir, SAMPLES_DIR, checkpoint_prefix)
+            generate_faces_from_latest(latent_dim, 16, checkpoint_dir, SAMPLES_DIR, checkpoint_prefix, hf_repo_id=hf_repo_id)
 
     elapsed_total = time.perf_counter() - t0_total
     print(f"\n[TIME] Full training took {_fmt_hms(elapsed_total)}")
