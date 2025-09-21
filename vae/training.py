@@ -18,6 +18,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+import tqdm
+
 CHECKPOINT_DIR = Path("checkpoints")
 SAMPLES_DIR = Path("samples")
 FILENAME_PREFIX = "vae"
@@ -143,7 +145,6 @@ transform = transforms.Compose([
     transforms.CenterCrop(178),
     transforms.Resize(128),
     transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
 ])
 
 dataset = "flwrlabs/celeba"
@@ -175,9 +176,9 @@ class VAE(nn.Module):
     def __init__(self, latent_dim=LATENT_DIM):
         super(VAE, self).__init__()
 
-        self.enc_conv1 = nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1)
-        self.enc_conv2 = nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)
-        self.enc_conv3 = nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1)
+        self.enc_conv1 = nn.Sequential(nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1), nn.BatchNorm2d(64), nn.GELU())
+        self.enc_conv2 = nn.Sequential(nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1), nn.BatchNorm2d(128), nn.GELU())
+        self.enc_conv3 = nn.Sequential(nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1), nn.BatchNorm2d(256), nn.GELU())
 
         self.fc_mu = nn.Linear(256 * 16 * 16, latent_dim)
         self.fc_logvar = nn.Linear(256 * 16 * 16, latent_dim)
@@ -188,9 +189,9 @@ class VAE(nn.Module):
         self.dec_conv3 = nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1)
 
     def encode(self, x):
-        x = F.leaky_relu(self.enc_conv1(x))
-        x = F.leaky_relu(self.enc_conv2(x))
-        x = F.leaky_relu(self.enc_conv3(x))
+        x = self.enc_conv1(x)
+        x = self.enc_conv2(x)
+        x = self.enc_conv3(x)
         x = x.view(x.size(0), -1)
         mu = self.fc_mu(x)
         logvar = self.fc_logvar(x)
@@ -206,7 +207,7 @@ class VAE(nn.Module):
         x = x.view(-1, 256, 16, 16)
         x = F.leaky_relu(self.dec_conv1(x))
         x = F.leaky_relu(self.dec_conv2(x))
-        x = torch.tanh(self.dec_conv3(x))
+        x = torch.sigmoid(self.dec_conv3(x))
         return x
 
     def forward(self, x):
@@ -289,7 +290,9 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
     """
     torch.backends.cudnn.benchmark = True
     model = VAE(latent_dim).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=LR)
+
+    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     run_idx = _next_run_index(checkpoint_dir=checkpoint_dir, prefix=checkpoint_prefix)
 
@@ -309,7 +312,7 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
         model.train()
         total_recon, total_kld = 0.0, 0.0
 
-        for batch_idx, (data, _) in enumerate(train_loader):
+        for batch_idx, (data, _) in enumerate(tqdm(train_loader)):
             data = data.to(device, non_blocking=True)
 
             optimizer.zero_grad()
@@ -318,6 +321,9 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
                 loss, recon_loss, kld, beta = vae_loss(recon, data, mu, logvar, epoch)
 
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             scaler.step(optimizer)
             scaler.update()
 
@@ -326,6 +332,8 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
 
             if short_run and batch_idx > 10:
                 break
+
+        scheduler.step()
 
         avg_train_loss = (total_recon + beta * total_kld) / len(train_loader)
         avg_recon = total_recon / len(train_loader)
@@ -369,8 +377,9 @@ if __name__ == "__main__":
         epochs=20,
         checkpoint_freq=10,
         sampling_freq=10,
-        short_run=False
-        # Uncomment and fill if you want auto-upload:
-        # service_account_json="service_account.json",
-        # drive_folder_id="YOUR_FOLDER_ID"
+        short_run=False,
+        # Optional:
+        service_account_json="json file path here",
+        drive_folder_id="folder id here"
     )
+    # generate_faces_from_latest()
