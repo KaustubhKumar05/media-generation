@@ -374,12 +374,12 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
 # ========================
 if __name__ == "__main__":
     vae_model = train_vae(
-        epochs=20,
-        checkpoint_freq=10,
-        sampling_freq=10,
+        epochs=1,
+        checkpoint_freq=1,
+        sampling_freq=1,
         short_run=False,
         # Optional:
         service_account_json="json file path here",
-        drive_folder_id="folder id here"
+        drive_folder_id="1I_KQDtb7PiPS1dyycMY_yeW27y131Oen"
     )
     # generate_faces_from_latest()
