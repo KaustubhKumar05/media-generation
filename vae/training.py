@@ -1,23 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 vae.py
-VAE training script with optional Google Drive upload support.
+VAE training script with HF upload support.
 Compatible with CPU, CUDA, and MPS.
+Full FP32 stability (no mixed precision)
 """
 
-# pip install torch torchvision matplotlib datasets tqdm pydrive2
-
-# ========================
-# Imports & Utils
-# ========================
 import re
 import time
 from datetime import datetime
 from pathlib import Path
-
 import torch
 import torch.nn as nn
-
 from tqdm import tqdm
 
 CHECKPOINT_DIR = Path("checkpoints")
@@ -27,11 +21,11 @@ FILENAME_PREFIX = "vae"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 
-
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, login
 
 hf_api = HfApi()
 hf_repo_id = "kozonhf/uploads"
+hf_subdir = "vae"
 
 def hf_upload(local_path: str | Path,
               repo_id: str,
@@ -43,7 +37,6 @@ def hf_upload(local_path: str | Path,
     """
     local_path = Path(local_path)
     path_in_repo = f"{subdir}/{local_path.name}" if subdir else local_path.name
-
     commit_url = hf_api.upload_file(
         path_or_fileobj=str(local_path),
         path_in_repo=path_in_repo,
@@ -52,7 +45,6 @@ def hf_upload(local_path: str | Path,
     )
     print(f"Uploaded {local_path} → {repo_id}/{path_in_repo}")
     return commit_url
-
 
 
 def _fmt_hms(seconds: float) -> str:
@@ -74,17 +66,10 @@ def _next_run_index(checkpoint_dir: Path = CHECKPOINT_DIR, prefix: str = FILENAM
 
 def _find_latest_checkpoint(checkpoint_dir: Path = CHECKPOINT_DIR,
                             prefix: str = FILENAME_PREFIX) -> Path | None:
-    """
-    Return the most recently modified checkpoint file,
-    regardless of its filename format.
-    """
     candidates = list(checkpoint_dir.glob(f"{prefix}_E*_I*_D*.pt"))
     if not candidates:
         return None
-
     return max(candidates, key=lambda p: p.stat().st_mtime)
-
-
 
 
 # ========================
@@ -104,7 +89,7 @@ class CelebAHFDataset(Dataset):
         img = self.ds[idx]["image"]
         if self.transform:
             img = self.transform(img)
-        return img, 0  # dummy label
+        return img, 0
 
 
 # ========================
@@ -116,7 +101,6 @@ from datasets import load_dataset
 from torch.utils.data import DataLoader
 from torchvision import transforms, utils
 
-# Device auto-selection
 if torch.backends.mps.is_available():
     device = torch.device("mps")
 elif torch.cuda.is_available():
@@ -131,8 +115,8 @@ LR = 5e-4
 SEED = 0
 LATENT_DIM = 128
 WARMUP_EPOCHS = 10
-MAX_BETA = 2.0
-NUM_WORKERS = min(32, multiprocessing.cpu_count() - 1)
+MAX_BETA = 1.5
+NUM_WORKERS = 8
 
 torch.manual_seed(SEED)
 
@@ -170,18 +154,15 @@ import torch.optim as optim
 class VAE(nn.Module):
     def __init__(self, latent_dim=LATENT_DIM):
         super(VAE, self).__init__()
-
-        self.enc_conv1 = nn.Sequential(nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1), nn.BatchNorm2d(64), nn.GELU())
-        self.enc_conv2 = nn.Sequential(nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1), nn.BatchNorm2d(128), nn.GELU())
-        self.enc_conv3 = nn.Sequential(nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1), nn.BatchNorm2d(256), nn.GELU())
-
+        self.enc_conv1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.GELU())
+        self.enc_conv2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.GELU())
+        self.enc_conv3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.GELU())
         self.fc_mu = nn.Linear(256 * 16 * 16, latent_dim)
         self.fc_logvar = nn.Linear(256 * 16 * 16, latent_dim)
-
         self.fc_decode = nn.Linear(latent_dim, 256 * 16 * 16)
-        self.dec_conv1 = nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1)
-        self.dec_conv2 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1)
-        self.dec_conv3 = nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1)
+        self.dec_conv1 = nn.ConvTranspose2d(256, 128, 4, 2, 1)
+        self.dec_conv2 = nn.ConvTranspose2d(128, 64, 4, 2, 1)
+        self.dec_conv3 = nn.ConvTranspose2d(64, 3, 4, 2, 1)
 
     def encode(self, x):
         x = self.enc_conv1(x)
@@ -189,7 +170,8 @@ class VAE(nn.Module):
         x = self.enc_conv3(x)
         x = x.view(x.size(0), -1)
         mu = self.fc_mu(x)
-        logvar = self.fc_logvar(x)
+        # clamp for stability
+        logvar = torch.clamp(self.fc_logvar(x), min=-10, max=10)
         return mu, logvar
 
     def reparameterize(self, mu, logvar):
@@ -212,8 +194,14 @@ class VAE(nn.Module):
 
 
 def vae_loss(recon_x, x, mu, logvar, epoch):
-    recon_loss = F.mse_loss(recon_x.float(), x.float(), reduction="sum") / x.size(0)
-    kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - torch.exp(logvar)) / (x.size(0) * mu.size(1))
+    recon_x = recon_x.float()
+    x = x.float()
+    mu = mu.float()
+    logvar = logvar.float()
+
+    recon_loss = F.mse_loss(recon_x, x, reduction="sum") / x.size(0)
+    kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - torch.exp(logvar))
+    kld /= (x.size(0) * mu.size(1))
     beta = min(1.0, epoch / WARMUP_EPOCHS) * MAX_BETA
     return recon_loss + kld * beta, recon_loss, kld, beta
 
@@ -222,26 +210,24 @@ def vae_loss(recon_x, x, mu, logvar, epoch):
 # Training Loop
 # ========================
 def _save_checkpoint(model: nn.Module, epoch: int, run_idx: int,
-                     checkpoint_dir: Path, prefix: str, hf_repo_id: str = "") -> Path:
+                     checkpoint_dir: Path, prefix: str) -> Path:
     datestr = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = checkpoint_dir / f"{prefix}_E{epoch:03d}_I{run_idx:03d}_D{datestr}.pt"
 
-    # Converting for a smaller file size
+    # save weights in FP16 for compact size
     state_dict_fp16 = {k: (v.half() if torch.is_floating_point(v) else v)
                        for (k, v) in model.state_dict().items()}
     torch.save(state_dict_fp16, path)
 
     print(f"\nSaved checkpoint: {path}")
-
     if hf_repo_id:
-        hf_upload(path, hf_repo_id, subdir="checkpoints")
-
+        hf_upload(path, hf_repo_id, subdir=hf_subdir + "/checkpoints")
     return path
 
 
 def generate_faces_from_latest(latent_dim=LATENT_DIM, num_samples=16,
                                checkpoint_dir: Path = CHECKPOINT_DIR, samples_dir: Path = SAMPLES_DIR,
-                               prefix: str = FILENAME_PREFIX, hf_repo_id: str = "") -> Path | None:
+                               prefix: str = FILENAME_PREFIX) -> Path | None:
     latest = _find_latest_checkpoint(checkpoint_dir, prefix)
     if latest is None:
         print("\nNo checkpoints found.")
@@ -267,17 +253,13 @@ def generate_faces_from_latest(latent_dim=LATENT_DIM, num_samples=16,
         print(f"\nGenerated faces from {latest.name} -> {out_path}")
 
         if hf_repo_id:
-            hf_upload(out_path, hf_repo_id, subdir="samples")
+            hf_upload(out_path, hf_repo_id, subdir=hf_subdir+"/samples")
         return out_path
 
 
 def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
               checkpoint_freq=10, sampling_freq=10,
               checkpoint_dir: Path = CHECKPOINT_DIR, checkpoint_prefix: str = FILENAME_PREFIX):
-    """
-    Train VAE model.
-    Checkpoints and sample images will be uploaded to HF
-    """
     torch.backends.cudnn.benchmark = True
     model = VAE(latent_dim).to(device)
 
@@ -286,32 +268,25 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
 
     run_idx = _next_run_index(checkpoint_dir=checkpoint_dir, prefix=checkpoint_prefix)
 
-
     print("\nStarting training…")
     t0_total = time.perf_counter()
 
-    scaler = torch.amp.GradScaler(device.type, enabled=(device.type == "cuda"))
-
     for epoch in range(epochs if not short_run else 1):
         t0_epoch = time.perf_counter()
-
         model.train()
         total_recon, total_kld = 0.0, 0.0
 
         for batch_idx, (data, _) in enumerate(tqdm(train_loader)):
             data = data.to(device, non_blocking=True)
-
             optimizer.zero_grad()
-            with torch.autocast(device_type=device.type, enabled=(device.type != "cpu")):
-                recon, mu, logvar = model(data)
-                loss, recon_loss, kld, beta = vae_loss(recon, data, mu, logvar, epoch)
 
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+            # full FP32 forward and loss
+            recon, mu, logvar = model(data)
+            loss, recon_loss, kld, beta = vae_loss(recon, data, mu, logvar, epoch)
+
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
 
             total_recon += recon_loss.item()
             total_kld += kld.item()
@@ -337,20 +312,17 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
         avg_val_loss = val_loss / len(val_loader)
 
         elapsed_epoch = time.perf_counter() - t0_epoch
-
-        print(f"Epoch {epoch:03d} | Train: {avg_train_loss:.4f} "
+        print(f"Epoch {epoch+1:03d} | Train: {avg_train_loss:.4f} "
               f"(Recon: {avg_recon:.4f}, KL: {avg_kld:.4f}, β={beta:.2f}) "
               f"| Val: {avg_val_loss:.4f} | [TIME] {_fmt_hms(elapsed_epoch)}")
 
         if (checkpoint_freq > 0 and (epoch + 1) % checkpoint_freq == 0) or epoch == epochs - 1:
-            _save_checkpoint(model, epoch + 1, run_idx, checkpoint_dir, checkpoint_prefix, hf_repo_id)
-
+            _save_checkpoint(model, epoch + 1, run_idx, checkpoint_dir, checkpoint_prefix)
         if (sampling_freq > 0 and (epoch + 1) % sampling_freq == 0) or epoch == epochs - 1:
-            generate_faces_from_latest(latent_dim, 16, checkpoint_dir, SAMPLES_DIR, checkpoint_prefix, hf_repo_id=hf_repo_id)
+            generate_faces_from_latest(latent_dim, 16, checkpoint_dir, SAMPLES_DIR, checkpoint_prefix)
 
     elapsed_total = time.perf_counter() - t0_total
     print(f"\n[TIME] Full training took {_fmt_hms(elapsed_total)}")
-
     return model
 
 
@@ -358,10 +330,11 @@ def train_vae(epochs=20, latent_dim=LATENT_DIM, short_run=True,
 # Main
 # ========================
 if __name__ == "__main__":
+    login(token="hf_token_goes_here")
     vae_model = train_vae(
-        epochs=1,
-        checkpoint_freq=1,
-        sampling_freq=1,
+        epochs=20,
+        checkpoint_freq=5,
+        sampling_freq=5,
         short_run=False,
     )
     # generate_faces_from_latest()
