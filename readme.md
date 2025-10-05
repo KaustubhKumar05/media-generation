@@ -7,7 +7,8 @@ Weights from the training run are uploaded on [HF](https://huggingface.co/kozonh
 The weights are stored in FP16 due to size limitations on GitHub - halved from FP32 which is the default. The main script
 has a `short_run` option to test out the changes by only running over a small number of batches.
 
-Result after training on "flwrlabs/celeba" from HuggingFace for 50 epochs on my local machine (~4 hours on M4 mps): 
+Result after training on "flwrlabs/celeba" from HuggingFace for 50 epochs on my local machine (~4 hours on M4 mps):
+<br />
 ![generated_faces](vae/samples/faces_vae_E050_I004_D20250910-000948_N16.png)
 
  Tested the script on Modal with GPU specific changes, refer `vae/training.py`. An Nvidia A10G
@@ -35,7 +36,7 @@ value is probably because of the background and not the facial structure itself.
 
 ![hardware metrics](vae/hardware_metrics.jpeg)
 
-The final setup on Modal cost USD 1.35/hour:
+The final setup on Modal cost USD 1.35/hour and takes 1.5-2 mins per epoch depending on CPU bursting:
 - 4 core CPU
 - Nvidia T4 16GB
 - 8GB RAM
