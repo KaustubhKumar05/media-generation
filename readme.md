@@ -48,4 +48,10 @@ add persistent storage or an upload workflow. The resulting weights were unavail
 
 ### GANs (...)
 
+G loss should start w 50% probability of fooling the disc and -ln(0.5) ~= 0.693
+D loss should start around -2 * ln(0.5) ~= 1.386
+Takes roughly 1 min per epoch on local
+Note on non saturating loss
+Diff learning rates
+
 ### Diffusion (...)
